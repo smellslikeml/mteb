@@ -209,3 +209,36 @@ Qwen3_Embedding_8B = ModelMeta(
     training_datasets=training_data,
     citation=QWEN3_CITATION,
 )
+
+REASONEMBED_CITATION = """@article{chen2025reasonembed,
+  title={ReasonEmbed: Enhanced Text Embeddings for Reasoning-Intensive Document Retrieval},
+  author={Chen, Jianlyu and Lan, Junwei and Li, Chaofan and Lian, Defu and Liu, Zheng},
+  journal={arXiv preprint arXiv:2510.08252},
+  year={2025}
+}"""
+
+
+bge_reasoner_embed_qwen3_8b = ModelMeta(
+    loader=q3e_instruct_loader,
+    name="BAAI/bge-reasoner-embed-qwen3-8b-0923",
+    model_type=["dense"],
+    languages=["eng-Latn"],
+    open_weights=True,
+    revision="02192a23ae188a684c39a860739a8fa3e0032f86",
+    release_date="2025-09-23",
+    n_parameters=7_568_405_504,  # byte-exact, from model.safetensors.index.json (F32)
+    n_embedding_parameters=622_329_856,  # embed_tokens.weight: 151936 x 4096
+    memory_usage_mb=28871,  # hub weights are F32, unlike the bf16 Qwen3 siblings
+    embed_dim=4096,
+    max_tokens=32768,
+    license="apache-2.0",
+    reference="https://huggingface.co/BAAI/bge-reasoner-embed-qwen3-8b-0923",
+    similarity_fn_name="cosine",
+    framework=["Sentence Transformers", "PyTorch", "safetensors", "Transformers"],
+    use_instructions=True,
+    public_training_code=None,
+    public_training_data=None,
+    training_datasets=None,  # card does not document training data
+    adapted_from="Qwen/Qwen3-Embedding-8B",
+    citation=REASONEMBED_CITATION,
+)

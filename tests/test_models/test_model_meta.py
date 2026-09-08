@@ -483,3 +483,40 @@ def test_model_meta_dependencies_not_installed_group():
         ),
     ):
         model_meta._check_requirements()
+
+
+def test_bge_reasoner_embed_qwen3_8b_registered():
+    """ReasonEmbed (BAAI/bge-reasoner-embed-qwen3-8b-0923) is registered with the
+    Qwen3 instruct loader and metadata matching its model card.
+
+    Ref: https://github.com/embeddings-benchmark/mteb/issues/3772
+    """
+    from mteb.models.model_implementations.qwen3_models import (
+        REASONEMBED_CITATION,
+        q3e_instruct_loader,
+    )
+
+    meta = mteb.get_model_meta("BAAI/bge-reasoner-embed-qwen3-8b-0923")
+
+    assert meta is not None
+    assert meta.revision == "02192a23ae188a684c39a860739a8fa3e0032f86"
+    assert meta.release_date == "2025-09-23"
+    assert meta.languages == ["eng-Latn"]
+    assert meta.open_weights is True
+    assert meta.license == "apache-2.0"
+    assert meta.model_type == ["dense"]
+    assert meta.similarity_fn_name is not None
+    assert meta.use_instructions is True
+    assert meta.embed_dim == 4096
+    assert meta.max_tokens == 32768
+    assert meta.n_parameters == 7_568_405_504
+    assert (
+        meta.reference
+        == "https://huggingface.co/BAAI/bge-reasoner-embed-qwen3-8b-0923"
+    )
+    # Reuses the module's shared Qwen3 instruct loader (query-side instructions only)
+    assert meta.loader is q3e_instruct_loader
+    # Carries the ReasonEmbed citation rather than the shared Qwen3 citation
+    assert meta.citation == REASONEMBED_CITATION
+    assert "arXiv:2510.08252" in meta.citation
+    assert "ReasonEmbed" in meta.citation
