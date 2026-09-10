@@ -22,6 +22,7 @@ from mteb.models import (
     SearchEncoderWrapper,
     SearchProtocol,
 )
+from mteb.models.search_encoder_index import MultiVectorSearchIndex
 from mteb.timing import TimingStack
 from mteb.types import (
     PromptType,
@@ -423,7 +424,12 @@ class AbsTaskRetrieval(AbsTask):
         search_model: SearchProtocol
 
         if isinstance(model, EncoderProtocol) and not isinstance(model, SearchProtocol):
-            search_model = SearchEncoderWrapper(model)
+            # Late-interaction (MaxSim) encoders get a multi-vector index that can
+            # store one embedding per token; single-vector models keep the default
+            # (None) path. Returns None for non-MaxSim models, preserving behavior.
+            search_model = SearchEncoderWrapper(
+                model, index_backend=MultiVectorSearchIndex.for_model(model)
+            )
         elif isinstance(model, CrossEncoderProtocol):
             search_model = SearchCrossEncoderWrapper(model)
         elif isinstance(model, SearchProtocol):
