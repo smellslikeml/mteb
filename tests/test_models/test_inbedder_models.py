@@ -34,19 +34,21 @@ def test_inbedder_registered_with_custom_loader():
     assert meta.name in {m.name for m in mteb.get_model_metas()}
 
 
-def test_answer_pooling_mean_and_zscore():
-    """Answer tokens are mean-pooled per example then z-score normalized."""
+def test_answer_pooling_mean_over_mask_tokens():
+    """Answer tokens are mean-pooled per example from the raw hidden states."""
     model = object.__new__(InBedderRobertaModel)
-    model.n_mask = 3
 
-    # 2 examples x 3 answer tokens x 4 dims.
-    answer_states = torch.arange(24, dtype=torch.float32).reshape(6, 4)
-    pooled = model._pool_answers(answer_states, n_texts=2)
+    # 2 examples x 4 tokens x 4 dims; the last 3 tokens per example are masks.
+    hidden_states = torch.arange(32, dtype=torch.float32).reshape(2, 4, 4)
+    answer_mask = torch.tensor(
+        [[False, True, True, True], [False, True, True, True]]
+    )
+    pooled = model._pool_answers(hidden_states, answer_mask)
 
     assert pooled.shape == (2, 4)
-    # z-scored rows are mean-centered with unit std.
-    assert torch.allclose(pooled.mean(1), torch.zeros(2), atol=1e-6)
-    assert torch.allclose(pooled.std(1), torch.ones(2), atol=1e-6)
+    # Each row is the mean of its three mask-token vectors, with no projection
+    # or z-score normalization applied.
+    assert torch.allclose(pooled, hidden_states[:, 1:, :].mean(1))
 
 
 def test_encode_resolves_instruction_and_batches():

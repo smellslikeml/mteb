@@ -23,23 +23,29 @@ INBEDDER_CITATION = """@article{peng2024answer,
 }"""
 
 
+# QA prompt template the RoBERTa InBedder was trained and evaluated with
+# (alpaca_train/train.py::QA_PROMPT_DICT and the MTEB configs in the reference
+# repo). The input text comes first, then the instruction posed as a question.
+QA_PROMPT = "### Input:\n{input}\n\n### Instruction:\n{instruction}\n\n### Response:"
+
+
 class InBedderRobertaModel(AbsEncoder):
     """MTEB wrapper for the RoBERTa InBedder instruction-following embedder.
 
     Implements the "answer the question" mechanism from Peng et al. (2024),
     "Answer is All You Need" (https://arxiv.org/abs/2402.09642): the task
-    instruction is treated as a *question* about the input text. It is appended
-    to the text as a masked-language-modeling prompt whose answer slots are
-    ``[MASK]`` tokens, and the pooled hidden states of those answer tokens --
-    passed through the MLM head's ``dense -> gelu -> layer_norm`` projection --
-    form the embedding. Texts that share the same (implicit) answer to the
-    instruction land close together in embedding space.
+    instruction is treated as a *question* about the input text. Text and
+    instruction are wrapped in the QA prompt template the model was trained
+    with, followed by ``[MASK]`` answer slots, and the mean of the mask tokens'
+    raw last-layer hidden states forms the embedding. Texts that share the same
+    (implicit) answer to the instruction land close together in embedding space.
 
-    Faithful to the reference encode() published on
-    https://huggingface.co/KomeijiForce/inbedder-roberta-large . The only
-    deviation is ``truncation="only_first"``: truncation is restricted to the
-    input text so the appended answer masks are never dropped, which keeps the
-    per-example mask count fixed and the answer-pooling reshape well defined.
+    Faithful to the paper's own MTEB pipeline (reference ``evaluation.py`` ->
+    ``MaskededLMEncoder`` with ``output_value=avg_gen_layer_24``): the answer
+    tokens are pooled straight from the encoder's last hidden state with no
+    ``lm_head`` projection and no z-score normalization. Truncation follows the
+    reference (``truncation=True`` with ``truncation_side="left"``) so long
+    inputs are trimmed from the front and the trailing answer masks survive.
     """
 
     def __init__(
@@ -62,47 +68,52 @@ class InBedderRobertaModel(AbsEncoder):
         )
 
         masked_lm = AutoModelForMaskedLM.from_pretrained(model_name, revision=revision)
-        self.tokenizer = AutoTokenizer.from_pretrained(model_name, revision=revision)
-        # The answer representation is read from the encoder backbone and the
-        # MLM head's projection (dense + layer_norm); the vocabulary decoder is
-        # not needed.
+        # Truncate from the left so the appended answer masks (at the end of the
+        # sequence) are never dropped, matching the reference tokenizer.
+        self.tokenizer = AutoTokenizer.from_pretrained(
+            model_name, revision=revision, truncation_side="left"
+        )
+        # The answer representation is read straight off the encoder backbone;
+        # the MLM head (projection + vocabulary decoder) is not used.
         self.model = masked_lm.roberta.to(self.device)
-        self.dense = masked_lm.lm_head.dense.to(self.device)
-        self.layer_norm = masked_lm.lm_head.layer_norm.to(self.device)
         self.model.eval()
 
     def to(self, device: torch.device) -> None:
         self.device = device
         self.model.to(device)
-        self.dense.to(device)
-        self.layer_norm.to(device)
 
-    def _pool_answers(self, answer_states: torch.Tensor, n_texts: int) -> torch.Tensor:
-        """Mean-pool the per-example answer tokens then z-score normalize.
+    def _pool_answers(
+        self, hidden_states: torch.Tensor, answer_mask: torch.Tensor
+    ) -> torch.Tensor:
+        """Mean-pool each example's answer-token hidden states.
 
-        ``answer_states`` holds the ``n_texts * n_mask`` answer-token vectors in
-        row order; they are grouped per example, averaged across the masks, and
-        standardized (mean-centered, unit std) exactly as in the reference.
+        Reproduces the reference ``avg_gen_layer`` aggregation: for every
+        example the last-layer hidden states at the ``[MASK]`` positions are
+        averaged, with no projection or z-score normalization.
         """
-        pooled = answer_states.reshape(n_texts, self.n_mask, -1).mean(1)
-        return (pooled - pooled.mean(1, keepdim=True)) / pooled.std(1, keepdim=True)
+        return torch.stack(
+            [
+                hidden_states[i][answer_mask[i]].mean(0)
+                for i in range(hidden_states.size(0))
+            ]
+        )
 
     def _embed_batch(self, texts: list[str], instruction: str) -> np.ndarray:
-        from torch.nn.functional import gelu
-
-        prompts = [instruction + self.tokenizer.mask_token * self.n_mask for _ in texts]
+        prompts = [
+            QA_PROMPT.format(input=text, instruction=instruction)
+            + self.tokenizer.mask_token * self.n_mask
+            for text in texts
+        ]
         inputs = self.tokenizer(
-            texts,
             prompts,
             padding=True,
-            truncation="only_first",
+            truncation=True,
             max_length=self.max_length,
             return_tensors="pt",
         ).to(self.device)
-        mask = inputs.input_ids.eq(self.tokenizer.mask_token_id)
-        answer_states = self.model(**inputs).last_hidden_state[mask]
-        answer_states = self.layer_norm(gelu(self.dense(answer_states)))
-        embeddings = self._pool_answers(answer_states, len(texts))
+        answer_mask = inputs.input_ids.eq(self.tokenizer.mask_token_id)
+        hidden_states = self.model(**inputs).last_hidden_state
+        embeddings = self._pool_answers(hidden_states, answer_mask)
         return embeddings.detach().cpu().float().numpy()
 
     def encode(
