@@ -1,5 +1,6 @@
 from .cache_wrappers import CacheBackendProtocol, CachedEmbeddingWrapper
 from .compression_wrappers import CompressionWrapper
+from .dimensionality_reduction_wrappers import DimensionalityReductionWrapper
 from .model_meta import ModelMeta
 from .models_protocols import (
     CrossEncoderProtocol,
@@ -21,6 +22,7 @@ __all__ = [
     "CompressionWrapper",
     "CrossEncoderProtocol",
     "CrossEncoderWrapper",
+    "DimensionalityReductionWrapper",
     "EncoderProtocol",
     "IndexEncoderSearchProtocol",
     "MTEBModels",
