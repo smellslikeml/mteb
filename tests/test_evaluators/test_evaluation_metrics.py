@@ -1,3 +1,9 @@
+import pytest
+
+from mteb._evaluators.adversarial_paraphrase_metrics import (
+    adversarial_paraphrase_accuracy,
+    split_scores_by_label,
+)
 from mteb._evaluators.retrieval_metrics import calculate_pmrr
 
 
@@ -47,3 +53,25 @@ def test_p_mrr():
         changed_qrels,
     )
     assert score == 0.75
+
+
+def test_adversarial_paraphrase_accuracy_forced_choice():
+    # anchors 0 and 2 pick the paraphrase; anchor 1 is fooled by the negative.
+    positive = [0.9, 0.4, 0.8]
+    negative = [0.5, 0.6, 0.2]
+    assert adversarial_paraphrase_accuracy(positive, negative) == pytest.approx(2 / 3)
+
+
+def test_adversarial_paraphrase_accuracy_ties_count_as_wrong():
+    assert adversarial_paraphrase_accuracy([0.5], [0.5]) == 0.0
+
+
+def test_adversarial_paraphrase_accuracy_rejects_mismatched_lengths():
+    with pytest.raises(ValueError):
+        adversarial_paraphrase_accuracy([0.1, 0.2], [0.1])
+
+
+def test_split_scores_by_label_preserves_order():
+    positive, negative = split_scores_by_label([0.9, 0.4, 0.5, 0.6], [1, 1, 0, 0])
+    assert positive == [0.9, 0.4]
+    assert negative == [0.5, 0.6]
