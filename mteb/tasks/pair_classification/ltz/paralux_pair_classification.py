@@ -5,7 +5,7 @@ from typing import TYPE_CHECKING, Any
 from datasets import Dataset
 
 from mteb._evaluators import PairClassificationEvaluator
-from mteb._evaluators.adversarial_paraphrase_selection import (
+from mteb._evaluators.adversarial_paraphrase_metrics import (
     adversarial_paraphrase_accuracy,
     split_scores_by_label,
 )
