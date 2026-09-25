@@ -6,9 +6,9 @@ reference implementation at https://github.com/zhang-yu-wei/InBedder.
 
 The core idea (InBedder): treat the user instruction as a *question* about the
 input text, append answer (mask) slots to it, run a masked-language-model
-encoder, and pool the hidden states at the answer positions after the LM head's
-projection. Two texts that imply the same answer to the instruction end up with
-similar representations, which is what makes the embedding instruction-aware.
+encoder, and mean-pool the raw last-layer hidden states at the answer positions.
+Two texts that imply the same answer to the instruction end up with similar
+representations, which is what makes the embedding instruction-aware.
 
 This module ports the RoBERTa (encoder / fill-mask) variant of InBedder at full
 fidelity. Only inference is implemented -- the fine-tuned weights are loaded from
@@ -22,7 +22,6 @@ from typing import TYPE_CHECKING, Any
 
 import numpy as np
 import torch
-from torch.nn.functional import gelu
 
 from mteb.models.abs_encoder import AbsEncoder
 from mteb.models.model_meta import ModelMeta, ScoringFunction
@@ -42,12 +41,20 @@ def _batched(iterable: Sequence[str], n: int) -> Generator[list[str], None, None
         yield batch
 
 
+# Prompt template the QA checkpoint was trained (and benchmarked) with. The
+# reference MTEB harness wraps every example in this pattern before appending the
+# answer (mask) slots -- see configs/maskedlm_roberta-large-qa.json in InBedder.
+_INSTRUCTION_PATTERN = (
+    "### Input:\n{input}\n\n### Instruction:\n{instruction}\n\n### Response:"
+)
+
+
 class InstructionAnswerEncoder(AbsEncoder):
     """InBedder encoder: embed a text by answering the instruction about it.
 
     The instruction is framed as a question and followed by ``n_mask`` answer
-    slots. The masked-language-model encoder fills those slots; the pooled,
-    LM-head-projected hidden states at the answer positions form the embedding.
+    slots. The masked-language-model encoder fills those slots; the mean-pooled
+    raw last-layer hidden states at the answer positions form the embedding.
     """
 
     def __init__(
@@ -69,24 +76,33 @@ class InstructionAnswerEncoder(AbsEncoder):
         masked_lm = AutoModelForMaskedLM.from_pretrained(
             model_name, revision=revision, **kwargs
         )
-        # InBedder pools the *answer* representation produced by the LM head's
-        # projection (dense -> gelu -> layer_norm), stopping short of the vocab
-        # decoder. We therefore keep the base encoder and the head's projection
-        # layers rather than the full masked-LM forward.
+        # InBedder's MTEB harness (MaskedLMEncoder, output_value avg_gen_layer_24)
+        # mean-pools the *raw* last-layer hidden states at the answer positions --
+        # no LM-head projection and no per-embedding standardization. We therefore
+        # only need the base encoder, whose last_hidden_state is that final layer.
         self.model = masked_lm.roberta.to(self.device).eval()
-        self.dense = masked_lm.lm_head.dense.to(self.device)
-        self.layer_norm = masked_lm.lm_head.layer_norm.to(self.device)
-        self.tokenizer = AutoTokenizer.from_pretrained(model_name, revision=revision)
+        # Left truncation keeps the trailing answer slots when the input is long,
+        # matching the reference tokenizer configuration.
+        self.tokenizer = AutoTokenizer.from_pretrained(
+            model_name, revision=revision, truncation_side="left"
+        )
 
     def _answer_embeddings(self, texts: list[str], instruction: str) -> torch.Tensor:
-        prompt = instruction + self.tokenizer.mask_token * self.n_mask
+        # Wrap each example in the trained "### Input ... ### Instruction ...
+        # ### Response:" pattern, then append the answer (mask) slots. Left
+        # truncation keeps those trailing slots, so each example ends with exactly
+        # ``n_mask`` masks for the reshape below.
+        prompts = [
+            _INSTRUCTION_PATTERN.replace("{input}", text).replace(
+                "{instruction}", instruction
+            )
+            + self.tokenizer.mask_token * self.n_mask
+            for text in texts
+        ]
         inputs = self.tokenizer(
-            texts,
-            [prompt] * len(texts),
+            prompts,
             padding=True,
-            # Only truncate the input text so the appended answer slots always
-            # survive -- this keeps exactly ``n_mask`` masks per example.
-            truncation="only_first",
+            truncation=True,
             max_length=self.max_length,
             return_tensors="pt",
         ).to(self.device)
@@ -95,12 +111,8 @@ class InstructionAnswerEncoder(AbsEncoder):
         with torch.no_grad():
             hidden_states = self.model(**inputs).last_hidden_state
 
-        answers = self.layer_norm(gelu(self.dense(hidden_states[mask])))
-        answers = answers.reshape(len(texts), self.n_mask, -1).mean(1)
-        # Per-embedding standardization, following the reference implementation.
-        answers = (answers - answers.mean(1, keepdim=True)) / answers.std(
-            1, keepdim=True
-        )
+        # Mean-pool the raw last-layer hidden states over the answer positions.
+        answers = hidden_states[mask].reshape(len(texts), self.n_mask, -1).mean(1)
         return answers
 
     def encode(

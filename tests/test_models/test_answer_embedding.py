@@ -45,10 +45,10 @@ class _FakeTokenizer:
     def __init__(self, n_mask):
         self.n_mask = n_mask
 
-    def __call__(self, texts, prompts, **kwargs):
+    def __call__(self, prompts, **kwargs):
         # one content token followed by exactly n_mask answer slots per example
         row = [1] + [self.mask_token_id] * self.n_mask
-        input_ids = torch.tensor([row for _ in texts])
+        input_ids = torch.tensor([row for _ in prompts])
         return _FakeBatch(input_ids=input_ids)
 
 
@@ -68,23 +68,24 @@ def _make_encoder(n_mask=3, hidden=8):
     enc.n_mask = n_mask
     enc.max_length = 512
     enc.device = "cpu"
-    enc.dense = torch.nn.Identity()
-    enc.layer_norm = torch.nn.Identity()
     enc.tokenizer = _FakeTokenizer(n_mask)
     enc.model = _FakeEncoder(hidden)
     return enc
 
 
-def test_answer_pooling_shape_and_standardization():
+def test_answer_pooling_shape_matches_raw_mask_mean():
     enc = _make_encoder(n_mask=3, hidden=8)
 
     out = enc._answer_embeddings(["I love cats", "I love dogs"], "what is the topic?")
 
     # one embedding per text, sized to the model hidden dimension
     assert out.shape == (2, 8)
-    # InBedder standardizes each embedding across the hidden dimension
-    assert torch.allclose(out.mean(1), torch.zeros(2), atol=1e-5)
-    assert torch.allclose(out.std(1), torch.ones(2), atol=1e-4)
+    # InBedder mean-pools the raw last-layer hidden states at the mask positions,
+    # with no projection and no per-embedding standardization.
+    torch.manual_seed(0)
+    hidden_states = torch.randn(2, 1 + enc.n_mask, 8)
+    expected = hidden_states[:, 1:, :].mean(1)
+    assert torch.allclose(out, expected, atol=1e-5)
 
 
 def test_encode_returns_numpy_embeddings():
