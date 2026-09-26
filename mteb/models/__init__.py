@@ -1,3 +1,4 @@
+from .answer_logit_pooling import InstructAnswerEncoderWrapper, pool_answer_logits
 from .cache_wrappers import CacheBackendProtocol, CachedEmbeddingWrapper
 from .compression_wrappers import CompressionWrapper
 from .model_meta import ModelMeta
@@ -23,11 +24,13 @@ __all__ = [
     "CrossEncoderWrapper",
     "EncoderProtocol",
     "IndexEncoderSearchProtocol",
+    "InstructAnswerEncoderWrapper",
     "MTEBModels",
     "ModelMeta",
     "SearchCrossEncoderWrapper",
     "SearchEncoderWrapper",
     "SearchProtocol",
     "SentenceTransformerEncoderWrapper",
+    "pool_answer_logits",
     "sentence_transformers_loader",
 ]
