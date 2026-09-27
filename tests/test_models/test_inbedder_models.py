@@ -1,21 +1,18 @@
 """Tests for the InBedder instruction-following embedder.
 
 These exercise the wiring into MTEB's existing model registry (the model is
-auto-discovered and resolvable through ``mteb.get_model_meta``) plus the two
-pure pieces of the paper's recipe (answer-slot prompt construction and the
-final per-embedding standardisation), without downloading the checkpoint.
+auto-discovered and resolvable through ``mteb.get_model_meta``) plus the pure
+piece of the reference's recipe (templated answer-slot prompt construction),
+without downloading the checkpoint.
 """
-
-import numpy as np
-import torch
 
 import mteb
 from mteb.models.abs_encoder import AbsEncoder
 from mteb.models.model_implementations.inbedder_models import (
     DEFAULT_QUESTION,
+    INBEDDER_PATTERN,
     InBedderModel,
     build_answer_prompts,
-    standardize_answer_embeddings,
 )
 from mteb.types import PromptType
 from tests.mock_tasks import MockRetrievalTask
@@ -33,31 +30,23 @@ def test_inbedder_registered_in_registry():
     assert MODEL_NAME in {m.name for m in mteb.get_model_metas()}
 
 
-def test_build_answer_prompts_appends_mask_slot():
+def test_build_answer_prompts_templates_text_and_appends_mask_slot():
     prompts = build_answer_prompts(
-        "Represent the topic", batch_size=2, mask_token="<mask>", n_mask=3
+        ["the cat sat"], "Represent the topic", mask_token="<mask>", n_mask=3
     )
-    assert prompts == ["Represent the topic<mask><mask><mask>"] * 2
+    expected = (
+        INBEDDER_PATTERN.replace("{input}", "the cat sat").replace(
+            "{instruction}", "Represent the topic"
+        )
+        + "<mask><mask><mask>"
+    )
+    assert prompts == [expected]
 
 
 def test_build_answer_prompts_falls_back_to_default_question():
-    prompts = build_answer_prompts("", batch_size=1, mask_token="<mask>", n_mask=1)
-    assert prompts == [f"{DEFAULT_QUESTION}<mask>"]
-
-
-def test_standardize_answer_embeddings_is_zero_mean_unit_std():
-    x = torch.tensor([[1.0, 2.0, 3.0, 4.0]])
-    out = standardize_answer_embeddings(x)
-    assert torch.allclose(out.mean(dim=1), torch.zeros(1), atol=1e-6)
-    # torch.std uses the unbiased estimator; the standardised row matches it.
-    assert torch.allclose(out.std(dim=1), torch.ones(1), atol=1e-5)
-
-
-def test_standardize_answer_embeddings_handles_constant_vector():
-    """A degenerate answer must not produce NaNs that poison cosine similarity."""
-    out = standardize_answer_embeddings(torch.full((1, 4), 5.0))
-    assert not torch.isnan(out).any()
-    assert np.allclose(out.numpy(), 0.0)
+    prompts = build_answer_prompts([""], "", mask_token="<mask>", n_mask=1)
+    assert DEFAULT_QUESTION in prompts[0]
+    assert prompts[0].endswith("<mask>")
 
 
 def test_instruction_is_used_verbatim_as_question():

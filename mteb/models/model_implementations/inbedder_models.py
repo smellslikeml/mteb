@@ -6,11 +6,19 @@ Answering the Question" (Peng et al., 2024, https://arxiv.org/abs/2402.09642).
 The paper's core idea is to treat the user instruction as a *question* about the
 input text and to represent the text by the (implicit) *answer* the model would
 give. For the RoBERTa checkpoint this is realised without any generation: the
-instruction is appended to the text followed by a run of ``<mask>`` tokens (the
-answer slot), the masked-LM head transform (dense -> gelu -> layer_norm) is
-applied to the hidden states at those mask positions, and the per-mask vectors
-are mean-pooled and standardised to form the embedding. Texts that would elicit
-the same answer to a given instruction land close together.
+text and instruction are laid out with the reference's ``### Input / ###
+Instruction / ### Response`` template, a run of ``<mask>`` tokens (the answer
+slot) is appended after ``### Response:``, and the embedding is the mean of the
+backbone's last-layer hidden states at those mask positions (the reference's
+``avg_gen`` aggregation). Texts that would elicit the same answer to a given
+instruction land close together.
+
+This mirrors the pipeline that produced the paper's MTEB numbers
+(``configs/maskedlm_roberta-large-qa.json`` +
+``lm_encoders_hf/maskedlm_encoder_hf.py`` in the reference), which uses the raw
+mask-position hidden states -- no masked-LM head transform and no per-embedding
+standardisation (those belong to the ``UseCase.ipynb`` model-card demo, a
+different code path).
 
 Implementation reference: https://github.com/zhang-yu-wei/InBedder and the
 ``KomeijiForce/inbedder-roberta-large`` model card.
@@ -22,7 +30,6 @@ from typing import TYPE_CHECKING, Any
 
 import numpy as np
 import torch
-from torch.nn.functional import gelu
 
 from mteb.models.abs_encoder import AbsEncoder
 from mteb.models.model_meta import ModelMeta, ScoringFunction
@@ -37,45 +44,45 @@ if TYPE_CHECKING:
 # answer (the paper always conditions the representation on an instruction).
 DEFAULT_QUESTION = "What is the meaning of this text?"
 
+# The reference's MTEB prompt (configs/maskedlm_roberta-large-qa.json): the text
+# and instruction are laid out with this template and the answer-slot masks are
+# appended after "### Response:".
+INBEDDER_PATTERN = (
+    "### Input:\n{input}\n\n### Instruction:\n{instruction}\n\n### Response:"
+)
+
 
 def build_answer_prompts(
-    instruction: str, batch_size: int, mask_token: str, n_mask: int
+    texts: list[str], instruction: str, mask_token: str, n_mask: int
 ) -> list[str]:
-    """Build the InBedder "answer slot" prompt for each item in a batch.
+    """Build the InBedder templated prompt with an answer slot for each text.
 
-    Following the paper's recipe, the prompt is the instruction (the question)
-    followed by ``n_mask`` mask tokens whose hidden states carry the answer.
+    Mirrors the reference pipeline: each text is placed in the ``### Input /
+    ### Instruction / ### Response`` template with the instruction as the
+    question, then ``n_mask`` mask tokens (whose hidden states carry the answer)
+    are appended after ``### Response:``.
 
     Args:
+        texts: The batch of input texts (one prompt per text).
         instruction: The task instruction, treated as a question. Falls back to
             ``DEFAULT_QUESTION`` when empty.
-        batch_size: Number of texts in the batch (one prompt per text).
         mask_token: The tokenizer's mask token string.
         n_mask: How many mask tokens form the answer slot.
 
     Returns:
-        A list of ``batch_size`` identical prompt strings.
+        A list of prompt strings, one per input text.
     """
     if n_mask < 1:
         raise ValueError("n_mask must be at least 1")
     question = instruction or DEFAULT_QUESTION
     answer_slot = mask_token * n_mask
-    return [f"{question}{answer_slot}"] * batch_size
-
-
-def standardize_answer_embeddings(
-    embeddings: torch.Tensor, eps: float = 1e-6
-) -> torch.Tensor:
-    """Standardise each embedding across its dimensions (InBedder's final step).
-
-    Mirrors the model card's ``(x - x.mean()) / x.std()`` per-embedding
-    normalisation, with a small ``eps`` clamp on the standard deviation so a
-    degenerate (constant) answer vector yields zeros instead of NaNs that would
-    poison downstream cosine similarity.
-    """
-    mean = embeddings.mean(dim=1, keepdim=True)
-    std = embeddings.std(dim=1, keepdim=True).clamp_min(eps)
-    return (embeddings - mean) / std
+    return [
+        INBEDDER_PATTERN.replace("{input}", text).replace(
+            "{instruction}", question
+        )
+        + answer_slot
+        for text in texts
+    ]
 
 
 class InBedderModel(AbsEncoder):
@@ -87,26 +94,28 @@ class InBedderModel(AbsEncoder):
         revision: str,
         device: str | None = None,
         n_mask: int = 3,
+        max_input_length: int = 512,
         **kwargs: Any,
     ) -> None:
         from transformers import AutoModelForMaskedLM, AutoTokenizer
 
         self.model_name = model_name
         self.n_mask = n_mask
+        self.max_input_length = max_input_length
         self.device = device or ("cuda" if torch.cuda.is_available() else "cpu")
 
         masked_lm = AutoModelForMaskedLM.from_pretrained(
             model_name, revision=revision, **kwargs
         )
+        # Truncate from the left (matching the reference) so the trailing answer
+        # slot and instruction survive when the templated text is too long.
         self.tokenizer = AutoTokenizer.from_pretrained(
-            model_name, revision=revision, **kwargs
+            model_name, revision=revision, truncation_side="left", **kwargs
         )
-        # InBedder reads the answer from the backbone hidden states passed through
-        # the MLM head's transform (dense -> gelu -> layer_norm), not the vocab
-        # projection, so we keep those three pieces and drop the decoder.
+        # InBedder's MTEB (avg_gen) aggregation reads the raw backbone hidden
+        # states at the mask positions, so we only need the encoder backbone --
+        # not the masked-LM head.
         self.model = masked_lm.roberta.to(self.device)
-        self.dense = masked_lm.lm_head.dense.to(self.device)
-        self.layer_norm = masked_lm.lm_head.layer_norm.to(self.device)
         self.model.eval()
 
     @torch.no_grad()
@@ -130,23 +139,23 @@ class InBedderModel(AbsEncoder):
         for start in range(0, len(texts), batch_size):
             batch = texts[start : start + batch_size]
             prompts = build_answer_prompts(
-                instruction, len(batch), self.tokenizer.mask_token, self.n_mask
+                batch, instruction, self.tokenizer.mask_token, self.n_mask
             )
-            # text is segment A, the question+answer-slot is segment B. Truncate
-            # only the text so the trailing mask tokens are never cut off.
+            # A single templated string per text; left-truncation keeps the
+            # trailing answer slot intact.
             encoded = self.tokenizer(
-                batch,
                 prompts,
                 padding=True,
-                truncation="only_first",
+                truncation=True,
+                max_length=self.max_input_length,
                 return_tensors="pt",
             ).to(self.device)
 
             mask = encoded.input_ids.eq(self.tokenizer.mask_token_id)
+            # avg_gen: mean of the raw last-layer hidden states over the mask
+            # positions (no MLM-head transform, no standardisation).
             hidden = self.model(**encoded).last_hidden_state[mask]
-            hidden = self.layer_norm(gelu(self.dense(hidden)))
             hidden = hidden.reshape(len(batch), self.n_mask, -1).mean(1)
-            hidden = standardize_answer_embeddings(hidden)
             embeddings.append(hidden.cpu().numpy())
 
         return np.concatenate(embeddings, axis=0)
